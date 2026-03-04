@@ -34,7 +34,7 @@ func (h *SeckillHandler) Execute(c *gin.Context) {
 		return
 	}
 
-	err = h.seckillSvc.Execute(c.Request.Context(), id, req.UserID)
+	err = h.seckillSvc.Execute(c.Request.Context(), req.UserID, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrAlreadyPurchased):

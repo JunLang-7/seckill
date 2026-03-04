@@ -45,6 +45,6 @@ func (r *productRepo) InitRedisStock(ctx context.Context, rdb *redis.Client, pro
 	if err := r.db.WithContext(ctx).First(&product, productID).Error; err != nil {
 		return err
 	}
-	stockKey := fmt.Sprintf("seckill:stock:{%d}", productID)
+	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
 	return rdb.Set(ctx, stockKey, product.Stock, 0).Err()
 }
