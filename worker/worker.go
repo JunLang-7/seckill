@@ -20,6 +20,7 @@ type Worker struct {
 	queue       *queue.OrderDeque
 	secKillRepo repo.SeckillRepo
 	rdb         *redis.Client
+	sleepFn     func(time.Duration) // overridable in tests; nil defaults to time.Sleep
 }
 
 func NewWorker(q *queue.OrderDeque, repo repo.SeckillRepo, rdb *redis.Client) *Worker {
@@ -54,7 +55,11 @@ func (w *Worker) processOrder(msg queue.SeckillMessage) {
 			backoff := time.Duration(1<<(attempt-2)) * time.Second // 1s, 2s
 			log.Printf("[worker] retrying order (attempt %d/%d, backoff %v): userID=%d productID=%d",
 				attempt, maxRetries, backoff, msg.UserID, msg.ProductID)
-			time.Sleep(backoff)
+			sleep := w.sleepFn
+			if sleep == nil {
+				sleep = time.Sleep
+			}
+			sleep(backoff)
 		}
 
 		err = w.secKillRepo.CreateOrder(context.Background(), msg)
