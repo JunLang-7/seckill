@@ -15,6 +15,7 @@ import (
 	"seckill/router"
 	"seckill/service"
 	"seckill/worker"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -56,13 +57,14 @@ func main() {
 	seckillH := handler.NewSeckillHandler(seckillSvc)
 
 	// 6. Start worker pool
-	// Workers share a context tied to the OS signal so they begin draining on SIGTERM.
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	var wg sync.WaitGroup
 	w := worker.NewWorker(orderDeque, seckillRepo)
 	for i := 0; i < cfg.Queue.WorkerCount; i++ {
-		go w.Start(signalCtx)
+		wg.Add(1)
+		go w.Start(&wg)
 	}
 	log.Println("start ", cfg.Queue.WorkerCount, " worker success")
 
@@ -84,11 +86,18 @@ func main() {
 	<-signalCtx.Done()
 	log.Println("shutting down server...")
 
+	// Step 1: Stop accepting new HTTP requests.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatal("server shutdown:", err)
 	}
 	log.Println("server shutdown success")
+
+	// Step 2: Close the channel — signals workers that no new orders will arrive.
+	close(orderDeque.Ch)
+
+	// Step 3: Wait for every worker to finish processing whatever remains in the channel.
+	wg.Wait()
+	log.Println("all workers drained, process exiting")
 }

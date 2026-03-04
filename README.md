@@ -56,18 +56,35 @@ if err != nil {
 
 ### 4. Context 超时链路传递
 
-从 HTTP 层到数据库层严格遵守 Go 的 Context 链路，3 秒硬边界防止级联雪崩：
+HTTP 请求路径严格遵守 Go 的 Context 链路，3 秒硬边界防止级联雪崩：
 
 ```
 signal.NotifyContext (进程生命周期)
   └── middleware.RequestTimeout(3s)  ← 每个 HTTP 请求
        └── rdb.Decr(ctx)             ← Redis 调用复用请求 ctx
-
-worker.Start(shutdownCtx)
-  └── context.WithTimeout(Background, 3s)  ← 每次 DB 写入独立超时
 ```
 
-### 5. 数据一致性双重保障
+Worker 的数据库写入使用独立的 `context.Background()`，与请求生命周期完全解耦，不受请求超时或停机信号影响。
+
+### 5. 优雅停机 — 零丢单重启
+
+系统采用三步有序停机，确保内存 Channel 中积压的订单在进程退出前**全部落库**，杜绝"用户付了钱、进程重启后找不到订单"的问题。
+
+**错误做法（已修复前）：** Worker 监听 `ctx.Done()`，SIGTERM 一到立刻退出，Channel 里的待处理订单随进程消失。
+
+**三步停机顺序：**
+
+```
+① srv.Shutdown()        关闭 HTTP Server，停止接收新请求
+         ↓
+② close(orderDeque.Ch)  关闭 Channel，告知 Worker 不再有新订单
+         ↓
+③ wg.Wait()             死等全部 Worker 把 Channel 消费清空后，进程才退出
+```
+
+Worker 使用 `for msg := range ch` 消费队列，`range` 在 Channel 关闭且清空后自动退出，无需外部 Context 干预。
+
+### 6. 数据一致性双重保障
 
 | 层级 | 机制 | 作用 |
 |------|------|------|
@@ -100,7 +117,7 @@ mkt-system/
 ├── service/
 │   └── seckill_service.go       # 秒杀核心逻辑：Redis DECR + 回滚纪律
 ├── worker/
-│   └── worker.go                # Worker Pool：消费队列 → 写入 DB，支持优雅退出
+│   └── worker.go                # Worker Pool：range 消费队列 → 写入 DB，channel 关闭后自动退出
 └── pkg/
     └── mysql.go                 # GORM 连接池初始化
     └── redis.go                 # go-redis 客户端初始化 + Ping 健康检查

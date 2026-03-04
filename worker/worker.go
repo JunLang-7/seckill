@@ -6,6 +6,7 @@ import (
 	"log"
 	"seckill/queue"
 	"seckill/repo"
+	"sync"
 )
 
 type Worker struct {
@@ -17,15 +18,15 @@ func NewWorker(q *queue.OrderDeque, repo repo.SeckillRepo) *Worker {
 	return &Worker{queue: q, secKillRepo: repo}
 }
 
-func (w *Worker) Start(ctx context.Context) {
-	for {
-		select {
-		case msg := <-w.queue.Ch:
-			w.processOrder(msg)
-		case <-ctx.Done():
-			return
-		}
+// Start drains the order channel until it is closed and empty, then signals the
+// WaitGroup that this worker has exited. Shutdown is driven by main closing the
+// channel — NOT by cancelling a context — so no in-flight orders are dropped.
+func (w *Worker) Start(wg *sync.WaitGroup) {
+	defer wg.Done()
+	for msg := range w.queue.Ch {
+		w.processOrder(msg)
 	}
+	log.Println("[worker] channel closed, worker exiting")
 }
 
 func (w *Worker) processOrder(msg queue.SeckillMessage) {
