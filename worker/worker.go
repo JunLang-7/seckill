@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"log"
 	"seckill/queue"
 	"seckill/repo"
 )
@@ -27,5 +29,14 @@ func (w *Worker) Start(ctx context.Context) {
 }
 
 func (w *Worker) processOrder(msg queue.SeckillMessage) {
-
+	err := w.secKillRepo.CreateOrder(context.Background(), msg)
+	if err != nil {
+		if errors.Is(err, repo.ErrStockEmpty) {
+			log.Printf("[worker] stock exhausted at DB level: userID=%d productID=%d", msg.UserID, msg.ProductID)
+		} else {
+			log.Printf("[worker] failed to create order: userID=%d productID=%d, err=%v", msg.UserID, msg.ProductID, err)
+		}
+		return
+	}
+	log.Printf("[worker] order created: userID=%d productID=%d", msg.UserID, msg.ProductID)
 }
