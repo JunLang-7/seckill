@@ -67,7 +67,7 @@ func main() {
 	log.Println("start ", cfg.Queue.WorkerCount, " worker success")
 
 	// 7. Start Http Server
-	engine := router.Setup(productH, seckillH, cfg)
+	engine := router.Setup(productH, seckillH, cfg.Server)
 	srv := &http.Server{
 		Addr:    ":" + cfg.Server.Port,
 		Handler: engine,
