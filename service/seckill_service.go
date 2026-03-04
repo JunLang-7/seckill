@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"seckill/queue"
 	"seckill/repo"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -17,6 +16,45 @@ var (
 	ErrRedisUnavailable = errors.New("redis service unavailable")
 	ErrQueueFull        = errors.New("server is busy, please try again later")
 )
+
+// dupKeyTTLSec is the TTL (in seconds) for the per-user dedup key in Redis.
+const dupKeyTTLSec = 86400 // 24 h
+
+// seckillScript atomically handles the two Redis mutations that guard against
+// overselling and duplicate purchases.  Because Redis executes Lua scripts as a
+// single unit, no other client can observe an intermediate state and no Go-side
+// rollback logic is needed for these two steps.
+//
+// KEYS[1] = dupKey   (seckill:bought:{productID}:{userID})
+// KEYS[2] = stockKey (seckill:stock:{productID})
+// ARGV[1] = TTL in seconds for the dedup key
+//
+// Return codes:
+//
+//	0 = success (dedup key written, stock decremented)
+//	1 = already purchased (SET NX failed — key already existed)
+//	2 = sold out (DECR drove stock below zero; both mutations rolled back inside script)
+//	3 = Redis DECR error (e.g. stock key holds a non-integer; dupKey rolled back inside script)
+var seckillScript = redis.NewScript(`
+local set = redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1])
+if not set then
+    return 1
+end
+
+local ok, remaining = pcall(redis.call, 'DECR', KEYS[2])
+if not ok then
+    redis.call('DEL', KEYS[1])
+    return 3
+end
+
+if remaining < 0 then
+    redis.call('INCR', KEYS[2])
+    redis.call('DEL', KEYS[1])
+    return 2
+end
+
+return 0
+`)
 
 type SeckillService interface {
 	Execute(ctx context.Context, userID, productID int) error
@@ -38,43 +76,33 @@ func NewSeckillService(rdb *redis.Client, q *queue.OrderDeque, repo repo.Seckill
 }
 
 // Execute is the fast-path handler for a seckill request.
-// It performs Redis-level pre-interception and enqueues accepted orders for async DB writes.
 //
-// Rollback discipline: every Redis mutation that succeeds must be undone if a subsequent step fails.
-// Rollback calls use context.Background() because the request context may already be expired.
+// The idempotency check and stock decrement are fused into a single atomic Lua
+// script (one EVALSHA roundtrip).  The only remaining failure path that requires
+// manual Redis rollback is queue saturation (Step 2 below).
 func (s *seckillService) Execute(ctx context.Context, userID, productID int) error {
-	// Step 1: Idempotency guard — prevent one user from buying the same product twice.
 	dupKey := fmt.Sprintf("seckill:bought:%d:%d", productID, userID)
-	result, err := s.rdb.SetNX(ctx, dupKey, "1", 24*time.Hour).Result()
-	if err != nil {
-		return ErrRedisUnavailable
-	}
-	if !result {
-		return ErrAlreadyPurchased
-	}
-
-	// Step 2: Atomic stock decrement.
 	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
-	remaining, err := s.rdb.Decr(ctx, stockKey).Result()
+
+	// Step 1: Atomic idempotency guard + stock decrement via Lua script.
+	res, err := seckillScript.Run(ctx, s.rdb, []string{dupKey, stockKey}, dupKeyTTLSec).Int()
 	if err != nil {
-		// redis failed after set dup key
-		s.rdb.Del(context.Background(), dupKey)
 		return ErrRedisUnavailable
 	}
-	if remaining < 0 {
-		// stock exhausted: restore counter and clean up dup key
-		s.rdb.Incr(context.Background(), stockKey)
-		s.rdb.Del(context.Background(), dupKey)
+	switch res {
+	case 1:
+		return ErrAlreadyPurchased
+	case 2:
 		return ErrSoldOut
+	case 3:
+		return ErrRedisUnavailable
 	}
 
-	// Step 3: Enqueue for async DB write (non-blocking).
-	msg := queue.SeckillMessage{
-		UserID:    userID,
-		ProductID: productID,
-	}
+	// Step 2: Enqueue for async DB write (non-blocking).
+	// On failure both script mutations must be manually undone because they
+	// were committed to Redis before this point.
+	msg := queue.SeckillMessage{UserID: userID, ProductID: productID}
 	if err := s.queue.Push(msg); err != nil {
-		// queue saturated
 		s.rdb.Incr(context.Background(), stockKey)
 		s.rdb.Del(context.Background(), dupKey)
 		return ErrQueueFull

@@ -1,6 +1,6 @@
 # seckill 基于 Go 的高并发秒杀系统
 
-> 一个生产可用的高并发秒杀系统，采用 Redis 原子扣减 + Channel 异步削峰 + 双重防超卖机制，单机可抗万级 QPS。
+> 一个生产可用的高并发秒杀系统，采用 Redis Lua 原子脚本 + Channel 异步削峰 + 双重防超卖机制，单机可抗万级 QPS。
 
 ## 技术栈
 
@@ -18,17 +18,42 @@
 
 ## 核心设计亮点
 
-### 1. Redis 原子扣减 — 彻底杜绝超卖
+### 1. Redis Lua 原子脚本 — 彻底杜绝超卖与部分失败
 
-摒弃传统悲观锁方案，使用 Redis `DECR` 进行毫秒级前置拦截。每次请求到达时，Redis 原子地将库存减 1，无需加锁，天然支持万级并发读写。
+摒弃传统悲观锁方案，将幂等校验（`SET NX`）与库存扣减（`DECR`）合并为一段 **Redis Lua 脚本**，通过单次 `EVALSHA` 原子执行。Redis 单线程执行 Lua，过程中任何客户端都无法观察到中间状态，彻底消除两步操作之间的"窗口期漏洞"。
 
+**旧方案的隐患：** `SetNX` 成功、`Decr` 因网络抖动丢失 → dupKey 永久存在 → 用户被永久拦截无法重购。
+
+**Lua 脚本逻辑：**
+
+```lua
+-- KEYS[1] = seckill:bought:{productID}:{userID}   （幂等 key）
+-- KEYS[2] = seckill:stock:{productID}             （库存 key）
+local set = redis.call('SET', KEYS[1], '1', 'NX', 'EX', ARGV[1])
+if not set then return 1 end          -- 已购买 → 409
+
+local ok, remaining = pcall(redis.call, 'DECR', KEYS[2])
+if not ok then                        -- DECR 异常（如 key 非整型）
+    redis.call('DEL', KEYS[1])        --   回滚幂等 key（在脚本内完成）
+    return 3                          --   → 503
+end
+if remaining < 0 then
+    redis.call('INCR', KEYS[2])       -- 回滚库存（在脚本内完成）
+    redis.call('DEL', KEYS[1])        -- 回滚幂等 key（在脚本内完成）
+    return 2                          -- 售罄 → 429
+end
+return 0                              -- 成功 → 进入队列
 ```
-Redis DECR seckill:stock:{id}
-  ├─ result >= 0  → 秒杀成功，进入队列
-  └─ result <  0  → 立即返回 429，INCR 回滚，库存精准归零
-```
 
-同时通过 `SETNX seckill:bought:{product_id}:{user_id}` 实现幂等性校验，同一用户对同一商品只能购买一次。
+| 返回码 | 含义 | HTTP |
+|--------|------|------|
+| `0` | 成功，stock 已扣减，dupKey 已写入 | 202 |
+| `1` | 用户已购买（SET NX 失败） | 409 |
+| `2` | 售罄（DECR 后 < 0，脚本内已回滚） | 429 |
+| `3` | Redis 异常（脚本内已回滚 dupKey） | 503 |
+| error | Redis 整体不可用 | 503 |
+
+Go 侧仅剩一个需要手动回滚的场景：**队列已满**（在 Lua 脚本成功之后、`Push` 之前）。所有其他失败路径全部在 Lua 内部自洽处理。
 
 ### 2. 异步削峰 — Channel 消息队列
 
@@ -47,7 +72,7 @@ HTTP 请求 → Redis DECR → channel.Push() → 立即返回 202
 Redis 出错时，系统**不会透传到 MySQL**，而是立即返回 `503 Service Unavailable`，防止雪崩效应：
 
 ```go
-remaining, err := rdb.Decr(ctx, stockKey).Result()
+res, err := seckillScript.Run(ctx, rdb, []string{dupKey, stockKey}, dupKeyTTLSec).Int()
 if err != nil {
     // 硬阻断：Redis 故障不穿透到 DB
     return ErrRedisUnavailable  // → HTTP 503
@@ -122,7 +147,7 @@ DEL  seckill:bought:{productID}:{userID} // 删除防重标记，用户可重新
 
 | 层级 | 机制 | 作用 |
 |------|------|------|
-| Redis 层 | `DECR` 原子操作 | 毫秒级拦截超卖，承载峰值流量 |
+| Redis 层 | Lua 原子脚本（`SET NX` + `DECR`，单次 EVALSHA） | 毫秒级拦截超卖，承载峰值流量，无部分失败窗口 |
 | MySQL 层 | `UPDATE ... WHERE stock > 0` | 最后防线，RowsAffected=0 时 ROLLBACK |
 | 唯一索引 | `UNIQUE(user_id, product_id)` | 防止极端情况下的重复落库 |
 
@@ -149,7 +174,7 @@ mkt-system/
 ├── router/
 │   └── router.go                # Gin 路由注册
 ├── service/
-│   └── seckill_service.go       # 秒杀核心逻辑：Redis DECR + 回滚纪律
+│   └── seckill_service.go       # 秒杀核心逻辑：Lua 原子脚本（SET NX + DECR）+ 队列满回滚
 ├── worker/
 │   └── worker.go                # Worker Pool：range 消费队列 → 写入 DB，channel 关闭后自动退出
 └── pkg/
