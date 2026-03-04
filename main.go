@@ -61,7 +61,7 @@ func main() {
 	defer stop()
 
 	var wg sync.WaitGroup
-	w := worker.NewWorker(orderDeque, seckillRepo)
+	w := worker.NewWorker(orderDeque, seckillRepo, rdb)
 	for i := 0; i < cfg.Queue.WorkerCount; i++ {
 		wg.Add(1)
 		go w.Start(&wg)
