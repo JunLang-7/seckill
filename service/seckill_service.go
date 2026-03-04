@@ -63,7 +63,7 @@ func (s *seckillService) Execute(ctx context.Context, userID, productID int) err
 	}
 	if remaining < 0 {
 		// stock exhausted: restore counter and clean up dup key
-		s.rdb.Incr(ctx, stockKey)
+		s.rdb.Incr(context.Background(), stockKey)
 		s.rdb.Del(context.Background(), dupKey)
 		return ErrSoldOut
 	}
@@ -75,7 +75,7 @@ func (s *seckillService) Execute(ctx context.Context, userID, productID int) err
 	}
 	if err := s.queue.Push(msg); err != nil {
 		// queue saturated
-		s.rdb.Incr(ctx, stockKey)
+		s.rdb.Incr(context.Background(), stockKey)
 		s.rdb.Del(context.Background(), dupKey)
 		return ErrQueueFull
 	}
