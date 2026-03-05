@@ -11,6 +11,7 @@
 | 缓存 | [go-redis/v9](https://github.com/redis/go-redis) v9.18.0 |
 | 消息队列 | Go 原生 `channel`（可替换 RabbitMQ） |
 | 配置管理 | [Viper](https://github.com/spf13/viper) v1.21.0 |
+| 限流 | [golang.org/x/time/rate](https://pkg.go.dev/golang.org/x/time/rate)（Go 官方扩展库） |
 | 数据库 | MySQL 8 |
 | Go 版本 | 1.25.6 |
 
@@ -151,6 +152,55 @@ DEL  seckill:bought:{productID}:{userID} // 删除防重标记，用户可重新
 | MySQL 层 | `UPDATE ... WHERE stock > 0` | 最后防线，RowsAffected=0 时 ROLLBACK |
 | 唯一索引 | `UNIQUE(user_id, product_id)` | 防止极端情况下的重复落库 |
 
+### 8. 全局限流 — 令牌桶保护入口
+
+在秒杀路由组（`/api/v1/seckill/*`）前挂载 **令牌桶（Token Bucket）** 中间件，在流量打到业务逻辑之前进行第一道削峰，防止单机被突发请求打垮。
+
+```
+每秒生成 5000 个令牌（ratePerSec = 5000）
+桶容量上限 10000（burstCapacity = 10000）
+
+请求到达 → limiter.Allow()
+  ├─ true  → 继续执行后续中间件与业务逻辑
+  └─ false → 立即返回 429 rate limit exceeded，不消耗任何 Redis / DB 资源
+```
+
+限流仅作用于秒杀接口，商品查询（`/api/v1/products`）和管理接口（`/admin`）不受影响。
+
+**已知局限：进程内状态，无法跨实例共享**
+
+令牌桶存活在单个进程的内存中。多副本部署时，每个实例各自维护独立的桶，实际放行的总 QPS 会等比放大：
+
+```
+目标：全局限制 5000 RPS
+
+单副本：✓  每实例 5000 RPS，总量 = 5000 RPS
+三副本：✗  每实例 5000 RPS，总量 = 15000 RPS（超出预期 3×）
+```
+
+**进阶方案：Redis 分布式限流**
+
+将令牌桶状态迁移到 Redis，所有实例共享同一个计数器，即可实现真正的全局限流：
+
+```lua
+-- 滑动窗口计数（每秒最多 N 次）
+local key   = KEYS[1]           -- e.g. "ratelimit:seckill"
+local limit = tonumber(ARGV[1]) -- e.g. 5000
+local now   = tonumber(ARGV[2]) -- Unix 毫秒时间戳
+local window = 1000             -- 1 秒窗口（ms）
+
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+    return 0  -- 触发限流
+end
+redis.call('ZADD', key, now, now)
+redis.call('PEXPIRE', key, window)
+return 1  -- 放行
+```
+
+当前实现适合单机部署或对全局精度要求不高的场景；水平扩容后建议替换为上述 Redis 方案。
+
 ---
 
 ## 项目结构
@@ -163,6 +213,9 @@ mkt-system/
 ├── handler/
 │   ├── product.go               # 商品 CRUD + 管理员初始化 Redis 库存
 │   └── seckill.go               # 秒杀接口（快速路径，返回 202）+ 订单查询
+├── middleware/
+│   ├── ratelimit.go             # 令牌桶全局限流（/api/v1/seckill/* 专用）
+│   └── timeout.go               # HTTP 请求超时中间件
 ├── model/
 │   ├── product.go               # Product GORM 模型
 │   └── seckill.go               # SeckillRecord 模型 + 状态常量
@@ -200,7 +253,7 @@ mkt-system/
 |-------------|------|
 | `202 Accepted` | 抢购成功，异步处理中 |
 | `409 Conflict` | 已购买，不可重复 |
-| `429 Too Many Requests` | 库存售罄 |
+| `429 Too Many Requests` | 库存售罄（`product is sold out`）或限流触发（`rate limit exceeded`） |
 | `503 Service Unavailable` | Redis 故障 / 队列已满 |
 
 ---
