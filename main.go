@@ -45,7 +45,7 @@ func main() {
 	log.Println("redis connection success")
 
 	// 4. Build order queue
-	orderDeque := queue.NewOrderDeque(cfg.Queue.BufferSize)
+	orderDeque := queue.NewOrderDeque(cfg.Queue.AmqpURL)
 
 	// 5. Wire repositories, servers & handlers
 	productRepo := repo.NewProductRepo(db)
@@ -64,7 +64,7 @@ func main() {
 	w := worker.NewWorker(orderDeque, seckillRepo, rdb)
 	for i := 0; i < cfg.Queue.WorkerCount; i++ {
 		wg.Add(1)
-		go w.Start(&wg)
+		go w.Start(signalCtx, &wg)
 	}
 	log.Println("start ", cfg.Queue.WorkerCount, " worker success")
 
@@ -94,10 +94,8 @@ func main() {
 	}
 	log.Println("server shutdown success")
 
-	// Step 2: Close the channel — signals workers that no new orders will arrive.
-	close(orderDeque.Ch)
-
-	// Step 3: Wait for every worker to finish processing whatever remains in the channel.
+	// Step 2: Wait for every worker to finish processing whatever remains in the channel.
 	wg.Wait()
+	orderDeque.Close()
 	log.Println("all workers drained, process exiting")
 }

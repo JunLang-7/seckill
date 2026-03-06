@@ -32,7 +32,7 @@ type RedisConfig struct {
 }
 
 type QueueConfig struct {
-	BufferSize  int
+	AmqpURL     string
 	WorkerCount int
 }
 
@@ -46,7 +46,7 @@ func Load() (*Config, error) {
 	viper.SetDefault("REDIS_ADDR", "127.0.0.1:6379")
 	viper.SetDefault("REDIS_PASSWORD", "")
 	viper.SetDefault("REDIS_DB", 0)
-	viper.SetDefault("QUEUE_BUFFER_SIZE", 10000)
+	viper.SetDefault("QUEUE_AMQP_URL", "amqp://guest:guest@localhost:5672/")
 	viper.SetDefault("QUEUE_WORKERS", 10)
 
 	viper.AutomaticEnv()
@@ -77,7 +77,7 @@ func Load() (*Config, error) {
 			DB:       viper.GetInt("REDIS_DB"),
 		},
 		Queue: QueueConfig{
-			BufferSize:  viper.GetInt("QUEUE_BUFFER_SIZE"),
+			AmqpURL:     viper.GetString("QUEUE_AMQP_URL"),
 			WorkerCount: viper.GetInt("QUEUE_WORKERS"),
 		},
 	}, nil

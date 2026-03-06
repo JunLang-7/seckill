@@ -63,11 +63,11 @@ type SeckillService interface {
 
 type seckillService struct {
 	rdb         *redis.Client
-	queue       *queue.OrderDeque
+	queue       queue.Queue
 	seckillRepo repo.SeckillRepo
 }
 
-func NewSeckillService(rdb *redis.Client, q *queue.OrderDeque, repo repo.SeckillRepo) SeckillService {
+func NewSeckillService(rdb *redis.Client, q queue.Queue, repo repo.SeckillRepo) SeckillService {
 	return &seckillService{
 		rdb:         rdb,
 		queue:       q,
