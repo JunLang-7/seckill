@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"seckill/queue"
 	"seckill/repo"
 	"sync"
@@ -40,8 +41,17 @@ func (w *Worker) Start(ctx context.Context, wg *sync.WaitGroup) {
 	}
 
 	for d := range deliveries {
+		// using recover makes a panic in any downstream call (repo, Redis, etc.) cannot
+		// crash the worker goroutine. The delivery is always Ack'd: for a panicking message 
+		// this avoids an infinite requeue loop (the message is almost certainly 
+		// a "poison pill" that would panic on every attempt).
+		defer func() {
+			if r := recover(); r != nil  {
+				log.Printf("[worker] PANIC recovered -acking message to prevent infinite requeue: panic=%v userID=%d productID=%d\n%s", r, d.Msg.UserID, d.Msg.ProductID, debug.Stack())
+			}
+			d.Ack()
+		}()
 		w.processOrder(d.Msg)
-		d.Ack()
 	}
 	log.Println("[worker] delivery channel closed, worker exiting")
 }

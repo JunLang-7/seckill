@@ -54,7 +54,7 @@ return 0                              -- 成功 → 进入队列
 | `3` | Redis 异常（脚本内已回滚 dupKey） | 503 |
 | error | Redis 整体不可用 | 503 |
 
-Go 侧仅剩一个需要手动回滚的场景：**队列已满**（在 Lua 脚本成功之后、`Push` 之前）。所有其他失败路径全部在 Lua 内部自洽处理。
+Go 侧唯一需要手动回滚的场景是 **`Push` 失败**（Lua 脚本已成功提交 Redis，但消息未能写入 Broker）。此时服务层立即执行手动回滚，将 Redis 状态还原到本次请求之前，然后返回 503。其他所有失败路径均在 Lua 脚本内部自洽处理。
 
 ### 2. 异步削峰 — RabbitMQ 消息队列
 
@@ -80,6 +80,7 @@ HTTP 请求 → Redis DECR → queue.Push() → 立即返回 202
 | 手动 Ack | `autoAck=false`，Worker 落库成功后才 `d.Ack()`，失败前消息不会从队列删除 |
 | 公平分发 | 每 Worker channel 设置 `Qos(prefetch=1)`，RabbitMQ 按 round-robin 分配，防止单 Worker 积压 |
 | Broker 故障隔离 | `Queue` 接口抽象(`Push` / `Consume`)，可一键替换底层实现，不影响 service/worker 逻辑 |
+| **Worker Panic 隔离** | 用 `defer recover()` 捕获每条消息的 panic 并 Ack，Worker goroutine 继续运行，不影响整个 Pool |
 
 ### 3. 优雅降级 — Redis 宕机硬阻断
 
@@ -221,6 +222,12 @@ return 1  -- 放行
 `PublishWithContext` 只保证消息进入 TCP 缓冲区，Broker 宕机仍可能丢消息。开启 Publisher Confirms 后，Broker 将消息 `fsync` 到持久化队列 journal 后才回送 `basic.ack`，`Push()` 收到 ack 才返回——客户端看到 `202` 时消息已落盘。
 
 `sync.Mutex` 串行化并发 `Push`：AMQP delivery-tag 单调递增，confirm 按 tag 顺序返回，加锁保证 tag ↔ confirm 一一对应，不错乱。超时（5 s）时触发 Redis `INCR` + `DEL` 回滚，返回 `503`。
+
+### 10. Worker Goroutine Panic 隔离
+
+`processOrder` 中的任何 panic（nil 指针、类型断言失败等）若不捕获，会立即终止当前 Worker goroutine，Pool 中永久少一个消费者，积压会随时间持续累积直到系统退化。
+
+通过 `defer recover()` 在**消息粒度**隔离 panic：panic 发生时记录完整堆栈供排查，然后 Ack 消息并继续处理下一条。选择 Ack 而非 Nack 是因为 panic 通常意味着代码 bug 或毒消息（poison pill），Nack 重投只会反复触发同一 panic，形成无限循环，严重时会拖垮整个 Pool。
 
 ---
 

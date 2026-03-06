@@ -215,6 +215,45 @@ func TestStart_DrainsAllMessagesBeforeExit(t *testing.T) {
 	assert.Equal(t, int64(total), processed, "all queued messages must be processed before exit")
 }
 
+// TestStart_PanicRecovery_WorkerContinues: a panic inside processOrder must not
+// crash the worker goroutine. Remaining messages after the panic must still be
+// processed, and the final count must equal total minus the panicking messages.
+func TestStart_PanicRecovery_WorkerContinues(t *testing.T) {
+	_, rdb := newTestRedis(t)
+
+	const total = 5
+	var processed int64
+
+	q := queuetest.NewFakeQueue(total)
+	for i := 0; i < total; i++ {
+		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
+	}
+
+	var callCount int64
+	w := &Worker{
+		queue: q,
+		secKillRepo: &mockRepo{fn: func(_ context.Context, _ queue.SeckillMessage) error {
+			n := atomic.AddInt64(&callCount, 1)
+			if n == 2 { // second message triggers a panic
+				panic("simulated poison-pill panic")
+			}
+			atomic.AddInt64(&processed, 1)
+			return nil
+		}},
+		rdb:     rdb,
+		sleepFn: func(time.Duration) {},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go w.Start(context.Background(), &wg)
+
+	q.Close()
+	wg.Wait()
+
+	assert.Equal(t, int64(total-1), processed, "worker must survive panic and process all remaining messages")
+}
+
 // TestStart_MultipleWorkers_ExactProcessing: N workers share one channel;
 // every message must be processed exactly once.
 func TestStart_MultipleWorkers_ExactProcessing(t *testing.T) {
