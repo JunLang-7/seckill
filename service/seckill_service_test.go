@@ -12,6 +12,7 @@ import (
 
 	"seckill/model"
 	"seckill/queue"
+	"seckill/queue/queuetest"
 	"seckill/service"
 )
 
@@ -72,7 +73,7 @@ func TestExecute_HappyPath(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	setStock(t, rdb, 1, 5)
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	require.NoError(t, svc.Execute(context.Background(), 42, 1))
@@ -95,7 +96,7 @@ func TestExecute_AlreadyPurchased(t *testing.T) {
 	setStock(t, rdb, 1, 5)
 	setDupKey(t, rdb, 1, 42)
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	err := svc.Execute(context.Background(), 42, 1)
@@ -110,7 +111,7 @@ func TestExecute_SoldOut_RollsBackRedis(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	setStock(t, rdb, 1, 0)
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	err := svc.Execute(context.Background(), 42, 1)
@@ -128,7 +129,7 @@ func TestExecute_RedisUnavailable(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	mr.SetError("ERR server unavailable") // makes ALL commands return an error
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	err := svc.Execute(context.Background(), 42, 1)
@@ -143,7 +144,7 @@ func TestExecute_DecrFails_CleansDupKey(t *testing.T) {
 	// Non-numeric value causes DECR to return an error
 	require.NoError(t, rdb.Set(context.Background(), stockKey(1), "NOT_A_NUMBER", 0).Err())
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	err := svc.Execute(context.Background(), 42, 1)
@@ -158,7 +159,7 @@ func TestExecute_QueueFull_RollsBackRedis(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	setStock(t, rdb, 1, 10)
 
-	q := queue.NewOrderDeque(0) // zero-capacity channel: Push always returns ErrQueueFull
+	q := queuetest.NewFakeQueue(0) // zero-capacity channel: Push always returns ErrQueueFull
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	err := svc.Execute(context.Background(), 42, 1)
@@ -174,7 +175,7 @@ func TestExecute_Idempotency(t *testing.T) {
 	mr, rdb := newTestRedis(t)
 	setStock(t, rdb, 1, 5)
 
-	q := queue.NewOrderDeque(10)
+	q := queuetest.NewFakeQueue(10)
 	svc := service.NewSeckillService(rdb, q, &mockRepo{})
 
 	require.NoError(t, svc.Execute(context.Background(), 42, 1))
@@ -195,7 +196,7 @@ func TestGetRecords_Success(t *testing.T) {
 	mock := &mockRepo{recordsFn: func(_ context.Context, _ int) ([]model.SecKillRecord, error) {
 		return want, nil
 	}}
-	svc := service.NewSeckillService(rdb, queue.NewOrderDeque(1), mock)
+	svc := service.NewSeckillService(rdb, queuetest.NewFakeQueue(1), mock)
 
 	got, err := svc.GetRecords(context.Background(), 1)
 	require.NoError(t, err)

@@ -25,7 +25,7 @@ import (
 	"seckill/config"
 	"seckill/handler"
 	"seckill/model"
-	"seckill/queue"
+	"seckill/queue/queuetest"
 	"seckill/repo"
 	"seckill/router"
 	"seckill/service"
@@ -43,7 +43,7 @@ type stack struct {
 	db          *gorm.DB
 	mr          *miniredis.Miniredis
 	rdb         *redis.Client
-	q           *queue.OrderDeque
+	q           *queuetest.FakeQueue
 	router      *gin.Engine
 	stopWorkers func() // closes channel and blocks until all workers exit
 }
@@ -76,7 +76,7 @@ func newStack(t *testing.T, productStock, numWorkers int) (*stack, int) {
 	require.NoError(t, rdb.Set(context.Background(), stockKey, productStock, 0).Err())
 
 	// Queue + repos + service
-	q := queue.NewOrderDeque(500)
+	q := queuetest.NewFakeQueue(500)
 	productRepo := repo.NewProductRepo(db)
 	seckillRepo := repo.NewSeckillRepo(db)
 	svc := service.NewSeckillService(rdb, q, seckillRepo)
@@ -91,7 +91,7 @@ func newStack(t *testing.T, productStock, numWorkers int) (*stack, int) {
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go w.Start(&wg)
+		go w.Start(context.Background(), &wg)
 	}
 
 	return &stack{
@@ -101,7 +101,7 @@ func newStack(t *testing.T, productStock, numWorkers int) (*stack, int) {
 		q:      q,
 		router: r,
 		stopWorkers: func() {
-			close(q.Ch)
+			q.Close()
 			wg.Wait()
 		},
 	}, p.ID
@@ -308,7 +308,7 @@ func TestIntegration_QueueSaturation_Returns503AndRollsBack(t *testing.T) {
 	stockKey := fmt.Sprintf("seckill:stock:%d", p.ID)
 	require.NoError(t, rdb.Set(context.Background(), stockKey, 10, 0).Err())
 
-	q := queue.NewOrderDeque(0) // zero capacity: Push always fails
+	q := queuetest.NewFakeQueue(0) // zero capacity: Push always fails
 	svc := service.NewSeckillService(rdb, q, repo.NewSeckillRepo(db))
 	seckillH := handler.NewSeckillHandler(svc)
 	productH := handler.NewProductHandler(repo.NewProductRepo(db), rdb)

@@ -18,6 +18,7 @@ import (
 
 	"seckill/model"
 	"seckill/queue"
+	"seckill/queue/queuetest"
 	repoPkg "seckill/repo"
 )
 
@@ -49,7 +50,7 @@ func mustGet(t *testing.T, mr *miniredis.Miniredis, key string) string {
 // instant during tests. The caller supplies the mock repo and redis client.
 func newFastWorker(mockRepo repoPkg.SeckillRepo, rdb *redis.Client) *Worker {
 	return &Worker{
-		queue:       queue.NewOrderDeque(10),
+		queue:       queuetest.NewFakeQueue(10),
 		secKillRepo: mockRepo,
 		rdb:         rdb,
 		sleepFn:     func(time.Duration) {}, // skip all backoff sleeps
@@ -189,7 +190,7 @@ func TestStart_DrainsAllMessagesBeforeExit(t *testing.T) {
 	const total = 20
 	var processed int64
 
-	q := queue.NewOrderDeque(total)
+	q := queuetest.NewFakeQueue(total)
 	for i := 0; i < total; i++ {
 		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
 	}
@@ -206,9 +207,9 @@ func TestStart_DrainsAllMessagesBeforeExit(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go w.Start(&wg)
+	go w.Start(context.Background(), &wg)
 
-	close(q.Ch) // shut the conveyor belt
+	q.Close() // shut the conveyor belt
 	wg.Wait()
 
 	assert.Equal(t, int64(total), processed, "all queued messages must be processed before exit")
@@ -225,7 +226,7 @@ func TestStart_MultipleWorkers_ExactProcessing(t *testing.T) {
 	)
 	var processed int64
 
-	q := queue.NewOrderDeque(total)
+	q := queuetest.NewFakeQueue(total)
 	for i := 0; i < total; i++ {
 		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
 	}
@@ -243,9 +244,9 @@ func TestStart_MultipleWorkers_ExactProcessing(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
-		go w.Start(&wg)
+		go w.Start(context.Background(), &wg)
 	}
-	close(q.Ch)
+	q.Close()
 	wg.Wait()
 
 	assert.Equal(t, int64(total), processed, "every message must be processed exactly once")

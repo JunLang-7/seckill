@@ -8,10 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"seckill/queue"
+	"seckill/queue/queuetest"
 )
 
 func TestPush_Success(t *testing.T) {
-	q := queue.NewOrderDeque(2)
+	q := queuetest.NewFakeQueue(2)
 	err := q.Push(queue.SeckillMessage{UserID: 1, ProductID: 10})
 	require.NoError(t, err)
 	assert.Len(t, q.Ch, 1)
@@ -22,7 +23,7 @@ func TestPush_Success(t *testing.T) {
 }
 
 func TestPush_ReturnsErrQueueFullWhenBufferSaturated(t *testing.T) {
-	q := queue.NewOrderDeque(1)
+	q := queuetest.NewFakeQueue(1)
 	require.NoError(t, q.Push(queue.SeckillMessage{UserID: 1, ProductID: 1}))
 
 	err := q.Push(queue.SeckillMessage{UserID: 2, ProductID: 1})
@@ -32,7 +33,7 @@ func TestPush_ReturnsErrQueueFullWhenBufferSaturated(t *testing.T) {
 // TestPush_ZeroCapacity verifies that a zero-capacity queue (unbuffered channel)
 // always rejects pushes — simulates a fully saturated queue in fast-path tests.
 func TestPush_ZeroCapacity(t *testing.T) {
-	q := queue.NewOrderDeque(0)
+	q := queuetest.NewFakeQueue(0)
 	err := q.Push(queue.SeckillMessage{UserID: 1, ProductID: 1})
 	assert.ErrorIs(t, err, queue.ErrQueueFull)
 }
@@ -41,7 +42,7 @@ func TestPush_ZeroCapacity(t *testing.T) {
 // that exactly `cap` succeed — the rest get ErrQueueFull.
 func TestPush_Concurrent(t *testing.T) {
 	const cap = 100
-	q := queue.NewOrderDeque(cap)
+	q := queuetest.NewFakeQueue(cap)
 
 	var (
 		wg      sync.WaitGroup
