@@ -220,13 +220,16 @@ return 1  -- 放行
 ## 项目结构
 
 ```
-mkt-system/
+seckill/
 ├── main.go                      # 程序入口：依赖注入、启动 Server 与 Worker Pool
 ├── config/
 │   └── config.go                # 配置结构体 + Viper 环境变量加载
 ├── handler/
 │   ├── product.go               # 商品 CRUD + 管理员初始化 Redis 库存
 │   └── seckill.go               # 秒杀接口（快速路径，返回 202）+ 订单查询
+├── loadtest/
+│   ├── vegeta_attack.sh         # vegeta attack 脚本
+│   └── wrk_seckill.lua          # wrk 测试 lua 脚本
 ├── middleware/
 │   ├── ratelimit.go             # 令牌桶全局限流（/api/v1/seckill/* 专用）
 │   └── timeout.go               # HTTP 请求超时中间件
@@ -303,22 +306,8 @@ mkt-system/
 ### 1. 启动依赖服务
 
 ```bash
-docker run -d \
-  --name mkt-mysql \
-  -p 3307:3306 \
-  -e MYSQL_ROOT_PASSWORD=password \
-  -e MYSQL_DATABASE=seckill \
-  mysql:8
-
-docker run -d \
-  --name mkt-redis \
-  -p 6379:6379 \
-  redis:latest
-
-docker run -d \
-  --name mkt-rabbitmq \
-  -p 5672:5672 \
-  rabbitmq:management-alpine
+# 启动 MySQL/Redis/RabbitMQ 容器
+docker compose up -d
 
 # 等待 MySQL 就绪（约 10 秒）
 until docker exec mkt-mysql mysqladmin ping -uroot -ppassword --silent 2>/dev/null; do
@@ -609,8 +598,8 @@ BenchmarkExecute_SoldOut-8            41989    76677 ns/op   ~13 000 rps  （售
 # 停止服务器（Ctrl+C 或 kill）
 kill $(lsof -ti:8080) 2>/dev/null && echo "server stopped"
 
-# 停止并删除 Docker 容器
-docker rm -f mkt-mysql mkt-redis mkt-rabbitmq && echo "containers removed"
+# 停止并删除 compose 管理的容器、网络、命名卷
+docker compose down -v
 ```
 
 ---
