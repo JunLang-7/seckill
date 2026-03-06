@@ -28,7 +28,6 @@ func (d Delivery) Ack()              { d.ack() }
 func (d Delivery) Nack(requeue bool) { d.nack(requeue) }
 
 // NewDelivery constructs a Delivery from the provided message and callbacks.
-// Intended for use in test helpers (e.g. queuetest.FakeQueue).
 func NewDelivery(msg SeckillMessage, ack func(), nack func(bool)) Delivery {
 	return Delivery{Msg: msg, ack: ack, nack: nack}
 }
@@ -106,13 +105,13 @@ func (q *OrderDeque) Consume(ctx context.Context) (<-chan Delivery, error) {
 	}
 
 	amqpDeliveries, err := ch.Consume(
-		q.q.Name, // queue
-		"",       // consumer tag (auto-generated)
-		false,    // autoAck — we ack manually after processing
-		false,    // exclusive
-		false,    // noLocal
-		false,    // noWait
-		nil,      // args
+		q.q.Name,
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil,
 	)
 	if err != nil {
 		ch.Close()
@@ -137,11 +136,11 @@ func (q *OrderDeque) Consume(ctx context.Context) (<-chan Delivery, error) {
 					d.Nack(false, false)
 					continue
 				}
-				delivery := Delivery{
-					Msg:  msg,
-					ack:  func() { d.Ack(false) },
-					nack: func(requeue bool) { d.Nack(false, requeue) },
-				}
+				delivery := NewDelivery(
+					msg,
+					func() { d.Ack(false) },
+					func(requeue bool) { d.Nack(false, requeue) },					
+				)
 				select {
 				case out <- delivery:
 				case <-ctx.Done():

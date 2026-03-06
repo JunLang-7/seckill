@@ -440,3 +440,183 @@ func TestIntegration_GetRecords_AfterPurchase(t *testing.T) {
 	assert.Equal(t, float64(100), rec["UserID"])
 	assert.Equal(t, float64(productID), rec["ProductID"])
 }
+
+// ─── additional coverage ──────────────────────────────────────────────────────
+
+// TestIntegration_HighConcurrency_NoOverselling is a stress variant of
+// TestIntegration_NoOverselling that uses 100 goroutines racing for 10 items.
+// It additionally verifies that the Redis stock counter reaches exactly 0 and
+// that every accepted request results in a DB record.
+func TestIntegration_HighConcurrency_NoOverselling(t *testing.T) {
+	const (
+		stockQty   = 10
+		totalUsers = 100
+		numWorkers = 5
+	)
+	s, productID := newStack(t, stockQty, numWorkers)
+
+	var (
+		mu        sync.Mutex
+		succeeded int
+		soldOut   int
+	)
+	var wg sync.WaitGroup
+	for userID := 1; userID <= totalUsers; userID++ {
+		wg.Add(1)
+		go func(uid int) {
+			defer wg.Done()
+			code := seckill(t, s.router, uid, productID)
+			mu.Lock()
+			defer mu.Unlock()
+			switch code {
+			case http.StatusAccepted:
+				succeeded++
+			case http.StatusTooManyRequests:
+				soldOut++
+			}
+		}(userID)
+	}
+	wg.Wait()
+
+	assert.Equal(t, stockQty, succeeded, "exactly stockQty HTTP 202 responses")
+	assert.Equal(t, totalUsers-stockQty, soldOut, "remaining requests must get 429")
+
+	s.stopWorkers()
+
+	var count int64
+	require.NoError(t, s.db.Model(&model.SecKillRecord{}).Count(&count).Error)
+	assert.Equal(t, int64(stockQty), count, "DB must have exactly stockQty records")
+
+	var p model.Product
+	require.NoError(t, s.db.First(&p, productID).Error)
+	assert.Equal(t, 0, p.Stock, "DB stock must reach 0")
+
+	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
+	v, err := s.rdb.Get(context.Background(), stockKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, "0", v, "Redis stock must reach 0")
+}
+
+// TestIntegration_UserRetryAfterQueueFullRollback verifies the full cycle:
+//  1. Queue is saturated → service returns 503 and rolls back Redis.
+//  2. After rollback the user has no Redis state (dedup key deleted, stock restored).
+//  3. On a subsequent attempt with a working queue the user succeeds and the
+//     order is persisted to the DB.
+func TestIntegration_UserRetryAfterQueueFullRollback(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.Product{}, &model.SecKillRecord{}))
+
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	p := model.Product{Name: "Retry Item", Stock: 10, Price: 2000}
+	require.NoError(t, db.Create(&p).Error)
+	stockKey := fmt.Sprintf("seckill:stock:%d", p.ID)
+	require.NoError(t, rdb.Set(context.Background(), stockKey, 10, 0).Err())
+
+	productRepo := repo.NewProductRepo(db)
+	seckillRepo := repo.NewSeckillRepo(db)
+	productH := handler.NewProductHandler(productRepo, rdb)
+	cfg := config.ServerConfig{RequestTimeout: 5 * time.Second}
+
+	const userID = 77
+
+	// ── Phase 1: zero-capacity queue → 503 + Redis rollback ──────────────────
+	q0 := queuetest.NewFakeQueue(0)
+	r0 := router.Setup(productH, handler.NewSeckillHandler(
+		service.NewSeckillService(rdb, q0, seckillRepo)), cfg)
+
+	code := seckill(t, r0, userID, p.ID)
+	assert.Equal(t, http.StatusServiceUnavailable, code, "saturated queue must return 503")
+
+	// Redis must be fully restored after rollback.
+	v, redisErr := rdb.Get(context.Background(), stockKey).Result()
+	require.NoError(t, redisErr)
+	assert.Equal(t, "10", v, "stock must be restored after queue-full rollback")
+
+	dupKey := fmt.Sprintf("seckill:bought:%d:%d", p.ID, userID)
+	exists, redisErr := rdb.Exists(context.Background(), dupKey).Result()
+	require.NoError(t, redisErr)
+	assert.Equal(t, int64(0), exists, "dedup key must not exist after rollback")
+
+	// ── Phase 2: normal queue → 202, order written to DB ─────────────────────
+	q1 := queuetest.NewFakeQueue(20)
+	r1 := router.Setup(productH, handler.NewSeckillHandler(
+		service.NewSeckillService(rdb, q1, seckillRepo)), cfg)
+
+	w := worker.NewWorker(q1, seckillRepo, rdb)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go w.Start(context.Background(), &wg)
+
+	code = seckill(t, r1, userID, p.ID)
+	assert.Equal(t, http.StatusAccepted, code, "retry after rollback must succeed")
+
+	q1.Close()
+	wg.Wait()
+
+	var count int64
+	require.NoError(t, db.Model(&model.SecKillRecord{}).Count(&count).Error)
+	assert.Equal(t, int64(1), count, "exactly one order must be written to DB after retry")
+}
+
+// TestIntegration_InvalidRequestBody_Returns400 verifies that a malformed JSON
+// body is rejected with 400 Bad Request and no Redis/DB state is modified.
+func TestIntegration_InvalidRequestBody_Returns400(t *testing.T) {
+	s, productID := newStack(t, 10, 1)
+	defer s.stopWorkers()
+
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/v1/seckill/%d", productID),
+		bytes.NewBufferString("not valid json {{{"))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// No Redis state written (stock untouched)
+	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
+	v, err := s.rdb.Get(context.Background(), stockKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, "10", v, "stock must be untouched after bad request")
+
+	var count int64
+	require.NoError(t, s.db.Model(&model.SecKillRecord{}).Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+}
+
+// TestIntegration_SeckillUnseededStock_Returns429 simulates the case where the
+// admin did not call InitSeckillStock before opening the sale.  The Redis stock
+// key is absent; DECR on a missing key creates it at -1 (< 0 → code 2), the
+// Lua script rolls back (INCR → 0, DEL dupKey), and the handler returns 429.
+func TestIntegration_SeckillUnseededStock_Returns429(t *testing.T) {
+	s, productID := newStack(t, 10, 1)
+	defer s.stopWorkers()
+
+	// Remove the stock key that newStack seeded — simulates an uninitialised sale.
+	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
+	require.NoError(t, s.rdb.Del(context.Background(), stockKey).Err())
+
+	code := seckill(t, s.router, 1, productID)
+	assert.Equal(t, http.StatusTooManyRequests, code, "unseed stock must be treated as sold-out")
+
+	// The Lua rollback leaves the key at 0 (created at -1, then INCRed back).
+	v, err := s.rdb.Get(context.Background(), stockKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, "0", v, "stock key must be 0 after sold-out rollback on missing key")
+
+	// No dedup key left behind.
+	dupKey := fmt.Sprintf("seckill:bought:%d:%d", productID, 1)
+	exists, err := s.rdb.Exists(context.Background(), dupKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), exists, "dedup key must be cleaned up")
+
+	var count int64
+	require.NoError(t, s.db.Model(&model.SecKillRecord{}).Count(&count).Error)
+	assert.Equal(t, int64(0), count, "no DB record may be written for a sold-out request")
+}
