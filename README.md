@@ -76,6 +76,7 @@ HTTP 请求 → Redis DECR → queue.Push() → 立即返回 202
 | 特性 | 实现 |
 |------|------|
 | 消息持久化 | Queue 声明为 `durable`，消息 `DeliveryMode: Persistent`，Broker 重启不丢消息 |
+| **发送方确认** | **Publisher Confirms：`Push()` 阻塞至 Broker fsync 回执，未收到 ack 则不返回 202** |
 | 手动 Ack | `autoAck=false`，Worker 落库成功后才 `d.Ack()`，失败前消息不会从队列删除 |
 | 公平分发 | 每 Worker channel 设置 `Qos(prefetch=1)`，RabbitMQ 按 round-robin 分配，防止单 Worker 积压 |
 | Broker 故障隔离 | `Queue` 接口抽象(`Push` / `Consume`)，可一键替换底层实现，不影响 service/worker 逻辑 |
@@ -214,6 +215,12 @@ return 1  -- 放行
 ```
 
 当前实现适合单机部署或对全局精度要求不高的场景；水平扩容后建议替换为上述 Redis 方案。
+
+### 9. 发送方确认 — Publisher Confirms
+
+`PublishWithContext` 只保证消息进入 TCP 缓冲区，Broker 宕机仍可能丢消息。开启 Publisher Confirms 后，Broker 将消息 `fsync` 到持久化队列 journal 后才回送 `basic.ack`，`Push()` 收到 ack 才返回——客户端看到 `202` 时消息已落盘。
+
+`sync.Mutex` 串行化并发 `Push`：AMQP delivery-tag 单调递增，confirm 按 tag 顺序返回，加锁保证 tag ↔ confirm 一一对应，不错乱。超时（5 s）时触发 Redis `INCR` + `DEL` 回滚，返回 `503`。
 
 ---
 
