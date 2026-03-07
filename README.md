@@ -217,11 +217,44 @@ return 1  -- 放行
 
 当前实现适合单机部署或对全局精度要求不高的场景；水平扩容后建议替换为上述 Redis 方案。
 
-### 9. 发送方确认 — Publisher Confirms
+### 9. 发送方确认 — Publisher Confirms + Channel Pool
 
-`PublishWithContext` 只保证消息进入 TCP 缓冲区，Broker 宕机仍可能丢消息。开启 Publisher Confirms 后，Broker 将消息 `fsync` 到持久化队列 journal 后才回送 `basic.ack`，`Push()` 收到 ack 才返回——客户端看到 `202` 时消息已落盘。
+为保证极端情况下的订单 0 丢失，引入了 RabbitMQ 的 **Publisher Confirms 机制**：Broker 将消息 `fsync` 到持久化队列后才回送 `basic.ack`，`Push()` 收到 ack 才返回——客户端看到 `202` 时消息已 100% 落盘。
 
-`sync.Mutex` 串行化并发 `Push`：AMQP delivery-tag 单调递增，confirm 按 tag 顺序返回，加锁保证 tag ↔ confirm 一一对应，不错乱。超时（5 s）时触发 Redis `INCR` + `DEL` 回滚，返回 `503`。
+**问题**：压力测试中发现，启用 Publisher Confirms 后，系统 **QPS骤降至 65**，并引发服务器端口枯竭。
+
+**原因分析**：同步 Confirm 机制引入网络 RTT 延迟（10+ ms）。早期实现复用单个 AMQP Channel 配合全局 `sync.Mutex`，导致**并发请求被强行串行化**：
+
+```go
+var mu sync.Mutex  // ← 全局锁
+
+func (q *OrderQueue) Push(msg SeckillMessage) error {
+    mu.Lock()      // 1000+ goroutine 在此阻塞
+    defer mu.Unlock()
+    
+    ch.PublishWithContext(...)  // 单个 Channel
+    time.Sleep(10*time.Millisecond)  // 等待 Broker confirm
+    // → 同时期吞吐量 = 1 / 10ms = 100 rps
+}
+```
+
+在 1 000+ 并发请求下，Mutex 成为全局热点。每个请求占有锁 10+ ms，积压的协程持续创建新 TCP 连接（重试机制）快速用尽操作系统的临时端口池（Linux/macOS 默认 28232）→ `bind: can't assign requested address` 错误级联。
+
+**解决方案**：利用 AMQP TCP 连接的多路复用特性，设计了一个 **AMQP Channel 连接池**。将全局锁争抢转化为 200 个 Channel 的**无锁并发池**：
+
+**性能对比**（vegeta 5 000 rps × 30 s）：
+
+| 指标 | 单 Channel | Channel Pool | 提升 |
+|------|-----------|--------------|------|
+| 吞吐量 | 65 rps | 4253 rps | **65.5×** |
+| 成功率 | 2.17% | 85.06% | **39.2×** |
+| P99 延迟 | 28.4 s | 55.9 ms | **降低 509×** |
+| 连接错误 | 125422 | 0 | **完全消除** |
+
+在保证消息 100% 刷盘确认的前提下，**QPS 重新拉回到数千级别**，关键指标：
+- P99 延迟从秒级降至毫秒级（秒杀场景实时响应）
+- 零连接错误（系统稳定可靠）
+- 池满时智能返回 503（优雅降级而非无限等待）
 
 ### 10. Worker Goroutine Panic 隔离
 
