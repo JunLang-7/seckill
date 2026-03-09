@@ -217,7 +217,24 @@ return 1  -- 放行
 
 当前实现适合单机部署或对全局精度要求不高的场景；水平扩容后建议替换为上述 Redis 方案。
 
-### 9. 发送方确认 — Publisher Confirms + Channel Pool
+### 9. 内存售罄标记与状态同步
+
+**问题背景：** 为了在商品售罄后进一步降低 Redis 负载，最直接的优化是在应用层增加一个内存标记（如 `isSoldOut = true`）。一旦标记为 `true`，后续请求直接在内存中被拦截并返回 429，无需访问 Redis。
+
+**风险：** 这是一个典型的分布式状态不一致问题。如果此时管理员通过后台补充了库存（修改了 MySQL 和 Redis），应用实例内存中的 `isSoldOut` 依然是 `true`，导致用户**永远无法购买**已补货的商品，造成业务故障。
+
+**解决方案：`sync.Map` + Redis Pub/Sub**
+
+为了解决该问题，引入了基于 Redis Pub/Sub 的状态同步机制：
+
+1.  **内存标记升级**：使用线程安全的 `sync.Map` 作为内存售罄标记。
+2.  **消息总线**：每个应用实例启动一个后台 Goroutine，订阅 Redis 的一个特定频道。
+3.  **状态广播**：当管理员后台补充库存时，管理工具在修改完数据库和 Redis 库存后，向该频道发布一条消息。
+4.  **本地状态同步**：所有订阅了该频道的应用实例都会收到此消息，并立即更新其本地的 `sync.Map`，将对应商品的售罄标记删除。
+
+通过此机制，所有实例的内存状态得以被动更新，实现了最终一致性，解决了因内存缓存引发的分布式数据不一致问题。
+
+### 10. 发送方确认 — Publisher Confirms + Channel Pool
 
 为保证极端情况下的订单 0 丢失，引入了 RabbitMQ 的 **Publisher Confirms 机制**：Broker 将消息 `fsync` 到持久化队列后才回送 `basic.ack`，`Push()` 收到 ack 才返回——客户端看到 `202` 时消息已 100% 落盘。
 
@@ -256,7 +273,7 @@ func (q *OrderQueue) Push(msg SeckillMessage) error {
 - 零连接错误（系统稳定可靠）
 - 池满时智能返回 503（优雅降级而非无限等待）
 
-### 10. Worker Goroutine Panic 隔离
+### 11. Worker Goroutine Panic 隔离
 
 `processOrder` 中的任何 panic（nil 指针、类型断言失败等）若不捕获，会立即终止当前 Worker goroutine，Pool 中永久少一个消费者，积压会随时间持续累积直到系统退化。
 

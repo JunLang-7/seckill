@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"seckill/repo"
 	"strconv"
@@ -54,6 +56,11 @@ func (h *ProductHandler) InitSeckillStock(c *gin.Context) {
 	if err := h.productRepo.InitRedisStock(c.Request.Context(), h.rdb, id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	productIDStr := fmt.Sprintf("%d", id)
+	if err := h.rdb.Publish(c.Request.Context(), "channel:stock_restore", productIDStr).Err(); err != nil {
+		log.Printf("Failed to publish stock restore product id %s: %v", productIDStr, err)
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "redis stock init success"})
 }

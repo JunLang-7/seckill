@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"seckill/queue"
 	"seckill/repo"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -65,13 +67,32 @@ type seckillService struct {
 	rdb         *redis.Client
 	queue       queue.Queue
 	seckillRepo repo.SeckillRepo
+	soldOutMap  sync.Map
 }
 
 func NewSeckillService(rdb *redis.Client, q queue.Queue, repo repo.SeckillRepo) SeckillService {
-	return &seckillService{
+	svc := &seckillService{
 		rdb:         rdb,
 		queue:       q,
 		seckillRepo: repo,
+	}
+	go svc.listenStockRestoreBroadcast()
+	return svc
+}
+
+// listenStockRestoreBroadcast listen the Publish/Subscribe channel of Redis,
+// change the soldOutMap if any stock restore happen
+func (s *seckillService) listenStockRestoreBroadcast() {
+	pubsub := s.rdb.Subscribe(context.Background(), "channel:stock_restore")
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	log.Printf("[LocalCache] subscribed to channel:stock_restore")
+	for msg := range ch {
+		productID := msg.Payload
+		// the product is not sold out anymore
+		s.soldOutMap.Delete(productID)
+		log.Println("[LocalCache] receive stock restore msg of", productID)
 	}
 }
 
@@ -81,6 +102,13 @@ func NewSeckillService(rdb *redis.Client, q queue.Queue, repo repo.SeckillRepo) 
 // script (one EVALSHA roundtrip).  The only remaining failure path that requires
 // manual Redis rollback is queue saturation (Step 2 below).
 func (s *seckillService) Execute(ctx context.Context, userID, productID int) error {
+	productIDStr := fmt.Sprintf("%d", productID)
+
+	// Fast path: if it's sold out, don't get into Redis
+	if _, ok := s.soldOutMap.Load(productIDStr); ok {
+		return ErrSoldOut
+	}
+
 	dupKey := fmt.Sprintf("seckill:bought:%d:%d", productID, userID)
 	stockKey := fmt.Sprintf("seckill:stock:%d", productID)
 
@@ -93,6 +121,8 @@ func (s *seckillService) Execute(ctx context.Context, userID, productID int) err
 	case 1:
 		return ErrAlreadyPurchased
 	case 2:
+		// Mark as sold out in memory to short circuit future requests before hitting Redis.
+		s.soldOutMap.Store(productIDStr, struct{}{})
 		return ErrSoldOut
 	case 3:
 		return ErrRedisUnavailable
