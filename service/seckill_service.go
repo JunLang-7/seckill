@@ -60,7 +60,7 @@ return 0
 
 type SeckillService interface {
 	Execute(ctx context.Context, userID, productID int) error
-	GetRecords(ctx context.Context, userID int) (interface{}, error)
+	GetRecords(ctx context.Context, userID int) (any, error)
 }
 
 type seckillService struct {
@@ -141,6 +141,6 @@ func (s *seckillService) Execute(ctx context.Context, userID, productID int) err
 	return nil
 }
 
-func (s *seckillService) GetRecords(ctx context.Context, userID int) (interface{}, error) {
+func (s *seckillService) GetRecords(ctx context.Context, userID int) (any, error) {
 	return s.seckillRepo.GetRecordByUserID(ctx, userID)
 }

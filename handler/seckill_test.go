@@ -25,13 +25,13 @@ func init() {
 
 type mockSeckillService struct {
 	executeFn    func(ctx context.Context, userID, productID int) error
-	getRecordsFn func(ctx context.Context, userID int) (interface{}, error)
+	getRecordsFn func(ctx context.Context, userID int) (any, error)
 }
 
 func (m *mockSeckillService) Execute(ctx context.Context, userID, productID int) error {
 	return m.executeFn(ctx, userID, productID)
 }
-func (m *mockSeckillService) GetRecords(ctx context.Context, userID int) (interface{}, error) {
+func (m *mockSeckillService) GetRecords(ctx context.Context, userID int) (any, error) {
 	return m.getRecordsFn(ctx, userID)
 }
 
@@ -45,7 +45,7 @@ func newRouter(svc service.SeckillService) *gin.Engine {
 	return r
 }
 
-func doExecute(t *testing.T, r *gin.Engine, productID string, body interface{}) *httptest.ResponseRecorder {
+func doExecute(t *testing.T, r *gin.Engine, productID string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	b, err := json.Marshal(body)
 	require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestSeckillHandler_Execute_UnexpectedError(t *testing.T) {
 
 func TestSeckillHandler_GetRecords_Success(t *testing.T) {
 	svc := &mockSeckillService{
-		getRecordsFn: func(_ context.Context, _ int) (interface{}, error) {
+		getRecordsFn: func(_ context.Context, _ int) (any, error) {
 			return []map[string]int{{"id": 1}}, nil
 		},
 	}
@@ -147,7 +147,7 @@ func TestSeckillHandler_GetRecords_Success(t *testing.T) {
 
 func TestSeckillHandler_GetRecords_InvalidUserID(t *testing.T) {
 	svc := &mockSeckillService{
-		getRecordsFn: func(_ context.Context, _ int) (interface{}, error) { return nil, nil },
+		getRecordsFn: func(_ context.Context, _ int) (any, error) { return nil, nil },
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/seckill/records/notanumber", nil)
 	rec := httptest.NewRecorder()
@@ -157,7 +157,7 @@ func TestSeckillHandler_GetRecords_InvalidUserID(t *testing.T) {
 
 func TestSeckillHandler_GetRecords_ServiceError(t *testing.T) {
 	svc := &mockSeckillService{
-		getRecordsFn: func(_ context.Context, _ int) (interface{}, error) {
+		getRecordsFn: func(_ context.Context, _ int) (any, error) {
 			return nil, errors.New("db error")
 		},
 	}

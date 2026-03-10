@@ -191,7 +191,7 @@ func TestStart_DrainsAllMessagesBeforeExit(t *testing.T) {
 	var processed int64
 
 	q := queuetest.NewFakeQueue(total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
 	}
 
@@ -225,7 +225,7 @@ func TestStart_PanicRecovery_WorkerContinues(t *testing.T) {
 	var processed int64
 
 	q := queuetest.NewFakeQueue(total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
 	}
 
@@ -266,7 +266,7 @@ func TestStart_MultipleWorkers_ExactProcessing(t *testing.T) {
 	var processed int64
 
 	q := queuetest.NewFakeQueue(total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		require.NoError(t, q.Push(queue.SeckillMessage{UserID: i, ProductID: 1}))
 	}
 
@@ -281,7 +281,7 @@ func TestStart_MultipleWorkers_ExactProcessing(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for range workers {
 		wg.Add(1)
 		go w.Start(context.Background(), &wg)
 	}

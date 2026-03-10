@@ -89,7 +89,7 @@ func newStack(t *testing.T, productStock, numWorkers int) (*stack, int) {
 	// Worker pool
 	w := worker.NewWorker(q, seckillRepo, rdb)
 	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
+	for range numWorkers {
 		wg.Add(1)
 		go w.Start(context.Background(), &wg)
 	}
@@ -431,12 +431,12 @@ func TestIntegration_GetRecords_AfterPurchase(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Handler returns {"data": [...]}
-	var resp map[string]interface{}
+	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	records, ok := resp["data"].([]interface{})
+	records, ok := resp["data"].([]any)
 	require.True(t, ok, "response must contain a 'data' array")
 	require.Len(t, records, 1, "exactly one record must be returned for user 100")
-	rec := records[0].(map[string]interface{})
+	rec := records[0].(map[string]any)
 	assert.Equal(t, float64(100), rec["UserID"])
 	assert.Equal(t, float64(productID), rec["ProductID"])
 }

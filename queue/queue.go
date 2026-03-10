@@ -88,7 +88,7 @@ func NewOrderDeque(amqpURL string) *OrderDeque {
 
 	// init Channel pool
 	pool := make(chan *confirmChannel, poolSize)
-	for i := 0; i < poolSize; i++ {
+	for range poolSize {
 		ch, err := conn.Channel()
 		if err != nil {
 			log.Fatal("Failed to open a channel", err)

@@ -50,7 +50,7 @@ func TestPush_Concurrent(t *testing.T) {
 		success int
 	)
 
-	for i := 0; i < cap*2; i++ {
+	for i := range cap * 2 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
